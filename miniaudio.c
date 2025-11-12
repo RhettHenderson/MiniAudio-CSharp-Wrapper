@@ -20,33 +20,15 @@
 
 typedef struct
 {
-    ma_spinlock lock;
-    char message[512];
-} ma_log_capture;
-
-typedef struct
-{
-    ma_result code;
-    char message[512];
-} ma_error_state;
-
-typedef struct
-{
     ma_context context;
     ma_device device;
     ma_pcm_rb ringBuffer;
-    ma_log log;
-    ma_log_callback logCallback;
-    ma_log_capture logCapture;
-    ma_error_state lastError;
     ma_format format;
     ma_uint32 channels;
     ma_uint32 sampleRate;
     ma_uint32 bufferSizeInFrames;
     ma_uint32 bytesPerFrame;
     ma_bool32 isStarted;
-    ma_bool32 logInitialized;
-    ma_bool32 logCallbackRegistered;
 } ma_microphone;
 
 typedef struct
@@ -54,186 +36,50 @@ typedef struct
     ma_context context;
     ma_device device;
     ma_pcm_rb ringBuffer;
-    ma_log log;
-    ma_log_callback logCallback;
-    ma_log_capture logCapture;
-    ma_error_state lastError;
     ma_format format;
     ma_uint32 channels;
     ma_uint32 sampleRate;
     ma_uint32 bufferSizeInFrames;
     ma_uint32 bytesPerFrame;
     ma_bool32 isStarted;
-    ma_bool32 logInitialized;
-    ma_bool32 logCallbackRegistered;
 } ma_speaker;
 
-static void ma_log_capture_init(ma_log_capture* pCapture)
+static ma_result ma_init_context_for_platform(ma_context* pContext)
 {
-    if (pCapture == NULL) {
-        return;
-    }
-
-    pCapture->lock = 0;
-    pCapture->message[0] = '\0';
-}
-
-static void ma_log_capture_store(ma_log_capture* pCapture, const char* pMessage)
-{
-    if (pCapture == NULL || pMessage == NULL) {
-        return;
-    }
-
-    if (ma_spinlock_lock(&pCapture->lock) != MA_SUCCESS) {
-        return;
-    }
-
-    ma_strncpy_s(pCapture->message, sizeof(pCapture->message), pMessage, (size_t)-1);
-    ma_spinlock_unlock(&pCapture->lock);
-}
-
-static ma_bool32 ma_log_capture_take(ma_log_capture* pCapture, char* pOut, size_t outSize)
-{
-    if (pOut == NULL || outSize == 0) {
-        return MA_FALSE;
-    }
-
-    pOut[0] = '\0';
-
-    if (pCapture == NULL) {
-        return MA_FALSE;
-    }
-
-    if (ma_spinlock_lock(&pCapture->lock) != MA_SUCCESS) {
-        return MA_FALSE;
-    }
-
-    if (pCapture->message[0] != '\0') {
-        ma_strncpy_s(pOut, outSize, pCapture->message, (size_t)-1);
-        pCapture->message[0] = '\0';
-        ma_spinlock_unlock(&pCapture->lock);
-        return MA_TRUE;
-    }
-
-    ma_spinlock_unlock(&pCapture->lock);
-    return MA_FALSE;
-}
-
-static void ma_log_capture_callback(void* pUserData, ma_uint32 level, const char* pMessage)
-{
-    (void)level;
-
-    if (pMessage == NULL) {
-        return;
-    }
-
-    if (level <= MA_LOG_LEVEL_WARNING) {
-        ma_log_capture_store((ma_log_capture*)pUserData, pMessage);
-    }
-}
-
-static void ma_error_state_init(ma_error_state* pErrorState)
-{
-    if (pErrorState == NULL) {
-        return;
-    }
-
-    pErrorState->code = MA_SUCCESS;
-    pErrorState->message[0] = '\0';
-}
-
-static void ma_error_state_set_success(ma_error_state* pErrorState)
-{
-    if (pErrorState == NULL) {
-        return;
-    }
-
-    pErrorState->code = MA_SUCCESS;
-    pErrorState->message[0] = '\0';
-}
-
-static void ma_error_state_set_failure(ma_error_state* pErrorState, ma_result result, const char* pFallbackMessage, ma_log_capture* pCapture)
-{
-    if (pErrorState == NULL) {
-        return;
-    }
-
-    pErrorState->code = result;
-
-    if (result == MA_SUCCESS) {
-        pErrorState->message[0] = '\0';
-        return;
-    }
-
-    char logMessage[sizeof(pErrorState->message)];
-    ma_bool32 hasLogMessage = ma_log_capture_take(pCapture, logMessage, sizeof(logMessage));
-
-    if (hasLogMessage) {
-        ma_strncpy_s(pErrorState->message, sizeof(pErrorState->message), logMessage, (size_t)-1);
-    } else if (pFallbackMessage != NULL && pFallbackMessage[0] != '\0') {
-        ma_strncpy_s(pErrorState->message, sizeof(pErrorState->message), pFallbackMessage, (size_t)-1);
-    } else {
-        ma_strncpy_s(pErrorState->message, sizeof(pErrorState->message), ma_result_description(result), (size_t)-1);
-    }
-}
-
-static ma_result ma_init_context_for_platform(ma_context* pContext, ma_log* pLog)
-{
-    ma_context_config config = ma_context_config_init();
-    if (pLog != NULL) {
-        config.pLog = pLog;
-    }
-
-    ma_result result;
-
 #if defined(_WIN32)
-    {
-        const ma_backend backends[] = {
-            ma_backend_wasapi,
-            ma_backend_dsound,
-            ma_backend_winmm
-        };
-        result = ma_context_init(backends, (ma_uint32)ma_countof(backends), &config, pContext);
-    }
+    const ma_backend backends[] = {
+        ma_backend_wasapi,
+        ma_backend_dsound,
+        ma_backend_winmm
+    };
+    return ma_context_init(backends, (ma_uint32)ma_countof(backends), NULL, pContext);
 #elif defined(__linux__)
-    {
-        const ma_backend backends[] = {
-            ma_backend_pulseaudio,
-            ma_backend_alsa,
-            ma_backend_jack
-        };
-        result = ma_context_init(backends, (ma_uint32)ma_countof(backends), &config, pContext);
-    }
-#elif defined(__APPLE__)
-    {
-        const ma_backend backends[] = {
-            ma_backend_coreaudio
-        };
-        result = ma_context_init(backends, (ma_uint32)ma_countof(backends), &config, pContext);
-    }
+    const ma_backend backends[] = {
+        ma_backend_pulseaudio,
+        ma_backend_alsa,
+        ma_backend_jack
+    };
+    return ma_context_init(backends, (ma_uint32)ma_countof(backends), NULL, pContext);
+#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+    const ma_backend backends[] = {
+        ma_backend_coreaudio
+    };
+    return ma_context_init(backends, (ma_uint32)ma_countof(backends), NULL, pContext);
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+    const ma_backend backends[] = {
+        ma_backend_coreaudio
+    };
+    return ma_context_init(backends, (ma_uint32)ma_countof(backends), NULL, pContext);
 #elif defined(__ANDROID__)
-    {
-        const ma_backend backends[] = {
-            ma_backend_aaudio,
-            ma_backend_opensl,
-            ma_backend_null
-        };
-        result = ma_context_init(backends, (ma_uint32)ma_countof(backends), &config, pContext);
-    }
+    const ma_backend backends[] = {
+        ma_backend_aaudio,
+        ma_backend_opensl,
+        ma_backend_null
+    };
+    return ma_context_init(backends, (ma_uint32)ma_countof(backends), NULL, pContext);
 #else
-    result = ma_context_init(NULL, 0, &config, pContext);
+    return ma_context_init(NULL, 0, NULL, pContext);
 #endif
-
-    if (result != MA_SUCCESS) {
-        ma_result fallback = ma_context_init(NULL, 0, &config, pContext);
-        if (fallback == MA_SUCCESS) {
-            return fallback;
-        }
-
-        return result;
-    }
-
-    return result;
 }
 
 static ma_uint32 ma_calculate_default_buffer_size(ma_uint32 sampleRate, ma_uint32 periodSizeInFrames)
@@ -313,34 +159,8 @@ static ma_result ma_microphone_init(ma_microphone* pMicrophone, ma_uint32 sample
 
     ma_zero_memory_64(pMicrophone, (ma_uint64)sizeof(*pMicrophone));
 
-    ma_log_capture_init(&pMicrophone->logCapture);
-    ma_error_state_init(&pMicrophone->lastError);
-
-    ma_result result = ma_log_init(NULL, &pMicrophone->log);
-    if (result == MA_SUCCESS) {
-        pMicrophone->logInitialized = MA_TRUE;
-        pMicrophone->logCallback = ma_log_callback_init(ma_log_capture_callback, &pMicrophone->logCapture);
-        if (ma_log_register_callback(&pMicrophone->log, pMicrophone->logCallback) == MA_SUCCESS) {
-            pMicrophone->logCallbackRegistered = MA_TRUE;
-        } else {
-            ma_log_uninit(&pMicrophone->log);
-            pMicrophone->logInitialized = MA_FALSE;
-        }
-    } else {
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to initialize capture log.", NULL);
-    }
-
-    result = ma_init_context_for_platform(&pMicrophone->context, pMicrophone->logInitialized ? &pMicrophone->log : NULL);
+    ma_result result = ma_init_context_for_platform(&pMicrophone->context);
     if (result != MA_SUCCESS) {
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to initialize capture context.", &pMicrophone->logCapture);
-        if (pMicrophone->logCallbackRegistered) {
-            ma_log_unregister_callback(&pMicrophone->log, pMicrophone->logCallback);
-            pMicrophone->logCallbackRegistered = MA_FALSE;
-        }
-        if (pMicrophone->logInitialized) {
-            ma_log_uninit(&pMicrophone->log);
-            pMicrophone->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
@@ -353,16 +173,7 @@ static ma_result ma_microphone_init(ma_microphone* pMicrophone, ma_uint32 sample
 
     result = ma_device_init(&pMicrophone->context, &config, &pMicrophone->device);
     if (result != MA_SUCCESS) {
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to initialize capture device.", &pMicrophone->logCapture);
         ma_context_uninit(&pMicrophone->context);
-        if (pMicrophone->logCallbackRegistered) {
-            ma_log_unregister_callback(&pMicrophone->log, pMicrophone->logCallback);
-            pMicrophone->logCallbackRegistered = MA_FALSE;
-        }
-        if (pMicrophone->logInitialized) {
-            ma_log_uninit(&pMicrophone->log);
-            pMicrophone->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
@@ -381,19 +192,9 @@ static ma_result ma_microphone_init(ma_microphone* pMicrophone, ma_uint32 sample
     if (result != MA_SUCCESS) {
         ma_device_uninit(&pMicrophone->device);
         ma_context_uninit(&pMicrophone->context);
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to allocate capture buffer.", &pMicrophone->logCapture);
-        if (pMicrophone->logCallbackRegistered) {
-            ma_log_unregister_callback(&pMicrophone->log, pMicrophone->logCallback);
-            pMicrophone->logCallbackRegistered = MA_FALSE;
-        }
-        if (pMicrophone->logInitialized) {
-            ma_log_uninit(&pMicrophone->log);
-            pMicrophone->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
-    ma_error_state_set_success(&pMicrophone->lastError);
     return MA_SUCCESS;
 }
 
@@ -411,16 +212,6 @@ static void ma_microphone_uninit(ma_microphone* pMicrophone)
     ma_pcm_rb_uninit(&pMicrophone->ringBuffer);
     ma_device_uninit(&pMicrophone->device);
     ma_context_uninit(&pMicrophone->context);
-
-    if (pMicrophone->logCallbackRegistered) {
-        ma_log_unregister_callback(&pMicrophone->log, pMicrophone->logCallback);
-        pMicrophone->logCallbackRegistered = MA_FALSE;
-    }
-
-    if (pMicrophone->logInitialized) {
-        ma_log_uninit(&pMicrophone->log);
-        pMicrophone->logInitialized = MA_FALSE;
-    }
 }
 
 static ma_result ma_speaker_init(ma_speaker* pSpeaker, ma_uint32 sampleRate, ma_uint32 channels, ma_format format, ma_uint32 bufferSizeInFrames)
@@ -431,34 +222,8 @@ static ma_result ma_speaker_init(ma_speaker* pSpeaker, ma_uint32 sampleRate, ma_
 
     ma_zero_memory_64(pSpeaker, (ma_uint64)sizeof(*pSpeaker));
 
-    ma_log_capture_init(&pSpeaker->logCapture);
-    ma_error_state_init(&pSpeaker->lastError);
-
-    ma_result result = ma_log_init(NULL, &pSpeaker->log);
-    if (result == MA_SUCCESS) {
-        pSpeaker->logInitialized = MA_TRUE;
-        pSpeaker->logCallback = ma_log_callback_init(ma_log_capture_callback, &pSpeaker->logCapture);
-        if (ma_log_register_callback(&pSpeaker->log, pSpeaker->logCallback) == MA_SUCCESS) {
-            pSpeaker->logCallbackRegistered = MA_TRUE;
-        } else {
-            ma_log_uninit(&pSpeaker->log);
-            pSpeaker->logInitialized = MA_FALSE;
-        }
-    } else {
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to initialize playback log.", NULL);
-    }
-
-    result = ma_init_context_for_platform(&pSpeaker->context, pSpeaker->logInitialized ? &pSpeaker->log : NULL);
+    ma_result result = ma_init_context_for_platform(&pSpeaker->context);
     if (result != MA_SUCCESS) {
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to initialize playback context.", &pSpeaker->logCapture);
-        if (pSpeaker->logCallbackRegistered) {
-            ma_log_unregister_callback(&pSpeaker->log, pSpeaker->logCallback);
-            pSpeaker->logCallbackRegistered = MA_FALSE;
-        }
-        if (pSpeaker->logInitialized) {
-            ma_log_uninit(&pSpeaker->log);
-            pSpeaker->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
@@ -471,16 +236,7 @@ static ma_result ma_speaker_init(ma_speaker* pSpeaker, ma_uint32 sampleRate, ma_
 
     result = ma_device_init(&pSpeaker->context, &config, &pSpeaker->device);
     if (result != MA_SUCCESS) {
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to initialize playback device.", &pSpeaker->logCapture);
         ma_context_uninit(&pSpeaker->context);
-        if (pSpeaker->logCallbackRegistered) {
-            ma_log_unregister_callback(&pSpeaker->log, pSpeaker->logCallback);
-            pSpeaker->logCallbackRegistered = MA_FALSE;
-        }
-        if (pSpeaker->logInitialized) {
-            ma_log_uninit(&pSpeaker->log);
-            pSpeaker->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
@@ -499,19 +255,9 @@ static ma_result ma_speaker_init(ma_speaker* pSpeaker, ma_uint32 sampleRate, ma_
     if (result != MA_SUCCESS) {
         ma_device_uninit(&pSpeaker->device);
         ma_context_uninit(&pSpeaker->context);
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to allocate playback buffer.", &pSpeaker->logCapture);
-        if (pSpeaker->logCallbackRegistered) {
-            ma_log_unregister_callback(&pSpeaker->log, pSpeaker->logCallback);
-            pSpeaker->logCallbackRegistered = MA_FALSE;
-        }
-        if (pSpeaker->logInitialized) {
-            ma_log_uninit(&pSpeaker->log);
-            pSpeaker->logInitialized = MA_FALSE;
-        }
         return result;
     }
 
-    ma_error_state_set_success(&pSpeaker->lastError);
     return MA_SUCCESS;
 }
 
@@ -529,16 +275,6 @@ static void ma_speaker_uninit(ma_speaker* pSpeaker)
     ma_pcm_rb_uninit(&pSpeaker->ringBuffer);
     ma_device_uninit(&pSpeaker->device);
     ma_context_uninit(&pSpeaker->context);
-
-    if (pSpeaker->logCallbackRegistered) {
-        ma_log_unregister_callback(&pSpeaker->log, pSpeaker->logCallback);
-        pSpeaker->logCallbackRegistered = MA_FALSE;
-    }
-
-    if (pSpeaker->logInitialized) {
-        ma_log_uninit(&pSpeaker->log);
-        pSpeaker->logInitialized = MA_FALSE;
-    }
 }
 
 MA_WRAPPER_API ma_microphone* ma_microphone_create(ma_uint32 sampleRate, ma_uint32 channels, ma_format format, ma_uint32 bufferSizeInFrames)
@@ -573,16 +309,12 @@ MA_WRAPPER_API ma_result ma_microphone_start(ma_microphone* pMicrophone)
     }
 
     if (pMicrophone->isStarted) {
-        ma_error_state_set_success(&pMicrophone->lastError);
         return MA_SUCCESS;
     }
 
     ma_result result = ma_device_start(&pMicrophone->device);
     if (result == MA_SUCCESS) {
         pMicrophone->isStarted = MA_TRUE;
-        ma_error_state_set_success(&pMicrophone->lastError);
-    } else {
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to start microphone device.", &pMicrophone->logCapture);
     }
 
     return result;
@@ -595,16 +327,12 @@ MA_WRAPPER_API ma_result ma_microphone_stop(ma_microphone* pMicrophone)
     }
 
     if (!pMicrophone->isStarted) {
-        ma_error_state_set_success(&pMicrophone->lastError);
         return MA_SUCCESS;
     }
 
     ma_result result = ma_device_stop(&pMicrophone->device);
     if (result == MA_SUCCESS) {
         pMicrophone->isStarted = MA_FALSE;
-        ma_error_state_set_success(&pMicrophone->lastError);
-    } else {
-        ma_error_state_set_failure(&pMicrophone->lastError, result, "Failed to stop microphone device.", &pMicrophone->logCapture);
     }
 
     return result;
@@ -612,12 +340,7 @@ MA_WRAPPER_API ma_result ma_microphone_stop(ma_microphone* pMicrophone)
 
 MA_WRAPPER_API ma_uint32 ma_microphone_read(ma_microphone* pMicrophone, void* pFramesOut, ma_uint32 frameCount)
 {
-    if (pMicrophone == NULL) {
-        return 0;
-    }
-
-    if (pFramesOut == NULL || frameCount == 0) {
-        ma_error_state_set_failure(&pMicrophone->lastError, MA_INVALID_ARGS, "Invalid read buffer for microphone.", NULL);
+    if (pMicrophone == NULL || pFramesOut == NULL || frameCount == 0) {
         return 0;
     }
 
@@ -708,16 +431,12 @@ MA_WRAPPER_API ma_result ma_speaker_start(ma_speaker* pSpeaker)
     }
 
     if (pSpeaker->isStarted) {
-        ma_error_state_set_success(&pSpeaker->lastError);
         return MA_SUCCESS;
     }
 
     ma_result result = ma_device_start(&pSpeaker->device);
     if (result == MA_SUCCESS) {
         pSpeaker->isStarted = MA_TRUE;
-        ma_error_state_set_success(&pSpeaker->lastError);
-    } else {
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to start speaker device.", &pSpeaker->logCapture);
     }
 
     return result;
@@ -730,16 +449,12 @@ MA_WRAPPER_API ma_result ma_speaker_stop(ma_speaker* pSpeaker)
     }
 
     if (!pSpeaker->isStarted) {
-        ma_error_state_set_success(&pSpeaker->lastError);
         return MA_SUCCESS;
     }
 
     ma_result result = ma_device_stop(&pSpeaker->device);
     if (result == MA_SUCCESS) {
         pSpeaker->isStarted = MA_FALSE;
-        ma_error_state_set_success(&pSpeaker->lastError);
-    } else {
-        ma_error_state_set_failure(&pSpeaker->lastError, result, "Failed to stop speaker device.", &pSpeaker->logCapture);
     }
 
     return result;
@@ -747,12 +462,7 @@ MA_WRAPPER_API ma_result ma_speaker_stop(ma_speaker* pSpeaker)
 
 MA_WRAPPER_API ma_uint32 ma_speaker_write(ma_speaker* pSpeaker, const void* pFrames, ma_uint32 frameCount)
 {
-    if (pSpeaker == NULL) {
-        return 0;
-    }
-
-    if (pFrames == NULL || frameCount == 0) {
-        ma_error_state_set_failure(&pSpeaker->lastError, MA_INVALID_ARGS, "Invalid write buffer for speaker.", NULL);
+    if (pSpeaker == NULL || pFrames == NULL || frameCount == 0) {
         return 0;
     }
 
@@ -818,7 +528,6 @@ MA_WRAPPER_API void ma_speaker_flush(ma_speaker* pSpeaker)
     }
 
     ma_pcm_rb_reset(&pSpeaker->ringBuffer);
-    ma_error_state_set_success(&pSpeaker->lastError);
 }
 
 MA_WRAPPER_API void ma_microphone_flush(ma_microphone* pMicrophone)
@@ -828,54 +537,4 @@ MA_WRAPPER_API void ma_microphone_flush(ma_microphone* pMicrophone)
     }
 
     ma_pcm_rb_reset(&pMicrophone->ringBuffer);
-    ma_error_state_set_success(&pMicrophone->lastError);
-}
-
-MA_WRAPPER_API ma_result ma_microphone_get_last_result(ma_microphone* pMicrophone)
-{
-    if (pMicrophone == NULL) {
-        return MA_INVALID_ARGS;
-    }
-
-    return pMicrophone->lastError.code;
-}
-
-MA_WRAPPER_API const char* ma_microphone_get_last_error_message(ma_microphone* pMicrophone)
-{
-    if (pMicrophone == NULL) {
-        return NULL;
-    }
-
-    if (pMicrophone->lastError.message[0] == '\0') {
-        return (pMicrophone->lastError.code == MA_SUCCESS) ? "" : ma_result_description(pMicrophone->lastError.code);
-    }
-
-    return pMicrophone->lastError.message;
-}
-
-MA_WRAPPER_API ma_result ma_speaker_get_last_result(ma_speaker* pSpeaker)
-{
-    if (pSpeaker == NULL) {
-        return MA_INVALID_ARGS;
-    }
-
-    return pSpeaker->lastError.code;
-}
-
-MA_WRAPPER_API const char* ma_speaker_get_last_error_message(ma_speaker* pSpeaker)
-{
-    if (pSpeaker == NULL) {
-        return NULL;
-    }
-
-    if (pSpeaker->lastError.message[0] == '\0') {
-        return (pSpeaker->lastError.code == MA_SUCCESS) ? "" : ma_result_description(pSpeaker->lastError.code);
-    }
-
-    return pSpeaker->lastError.message;
-}
-
-MA_WRAPPER_API const char* ma_result_description_utf8(ma_result result)
-{
-    return ma_result_description(result);
 }
